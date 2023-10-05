@@ -1,0 +1,117 @@
+import numpy as np
+
+# Load the dataset
+# df = pd.read_csv('mace.csv')
+
+# List of columns to be retained
+columns_to_keep = [4,5,6,7,8] + list(range(15,30)) + list(range(33,58)) + list(range(114,124)) + [126,127] + list(range(131,147)) + list(range(153,161)) + list(range(169,173))
+
+# Filter the dataset to retain only the desired columns
+filtered_df = df.iloc[:, columns_to_keep]
+
+# Remove columns with more than 20% missing data
+missing_threshold = 0.2 * len(filtered_df)
+filtered_df = filtered_df.dropna(thresh=missing_threshold, axis=1)
+
+# Impute the mean in the remaining columns with missing data
+for col in filtered_df.columns:
+    filtered_df[col].fillna(filtered_df[col].mean(), inplace=True)
+
+# Create the composite variable MACE as the union of columns 169-172
+filtered_df['MACE'] = filtered_df.iloc[:, -4:].any(axis=1).astype(int)
+
+# Save the filtered and modified dataframe
+# filtered_df.to_csv('path_to_your_filtered_file.csv', index=False)
+
+Code For Model Building (Vou incluir no GitHub, apenas para deixar salvo aqui):
+
+import numpy as np
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.impute import KNNImputer
+from sklearn.metrics import roc_auc_score, average_precision_score, classification_report
+import xgboost as xgb
+import optuna
+import shap
+
+# Load the dataset
+df = pd.read_csv('mace.csv')
+
+# Print the first 5 rows of the numeric columns
+
+numeric_cols = ['Weight', 'Height', 'BodyMassIndex', 'Hematocrit', 'Leukocytes', 'Platelets', 'TotalBilirubin', 'DirectBilirubin', 'Creatinine', 'Urea', 'ProthrombinTimeActivity', 'InternationalNormalizedRatio', 'Sodium', 'Potassium', 'Albumin', 'AST', 'ALT', 'GGT', 'AlkalinePhosphatase', 'LeftAtriumSize', 'DistalVolumeOfLeftVentricle', 'SystolicVolumeOfLeftVentricle']
+
+print(df[numeric_cols].head())
+
+# Print the first 5 rows of the categorical columns
+
+categorical_cols = ['Race', 'Sex', 'PreviousVaricealBandLigation', 'PortalHypertensiveGastropathy', 'Ascites', 'SpontaneousBacterialPeritonitis', 'HepatopulmonarySyndrome', 'BetaBlockerUse', 'PortalVeinThrombosis', 'HepaticEncephalopathy', 'HepatorenalSyndrome', 'AntibioticTherapyFor24h', 'HospitalizedFor48h', 'PreTransplantHemodialysis', 'HepatocellularCarcinoma', 'BloodGroup', 'CongestiveHeartFailure', 'Angioplasty', 'Dyslipidemia', 'Hypertension', 'AcuteMyocardialInfarction', 'Stroke', 'DiabetesMellitus', 'ValveReplacement', 'MitralInsufficiency', 'TricuspidInsufficiency', 'NonInvasiveMethod', 'DynamicAlteration']
+
+print(df[categorical_cols].head())
+df[categorical_cols]=df[categorical_cols].astype('category')
+
+
+# Define your features and target variable
+X = df.drop(columns=['mace'])
+y = df['mace']
+
+# Split the dataset into training and test sets
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
+
+# Preprocessing and imputation
+# Remove variables with more than 20% missing values
+missing_threshold = 0.2
+X_train = X_train[X_train.columns[X_train.isnull().mean() <= missing_threshold]]
+X_test = X_test[X_train.columns]
+
+# kNN imputation
+imputer = KNNImputer(n_neighbors=10)
+X_train_imputed = imputer.fit_transform(X_train)
+X_test_imputed = imputer.transform(X_test)
+
+# Model training and hyperparameter tuning
+def objective(trial):
+    param = {
+        'objective': 'binary:logistic',
+        'eval_metric': 'auc',
+        'booster': 'gbtree',
+        'use_label_encoder': False,
+        'lambda': trial.suggest_float('lambda', 1e-3, 10.0, log=True),
+        'alpha': trial.suggest_float('alpha', 1e-3, 10.0, log=True),
+        'colsample_bytree': trial.suggest_float('colsample_bytree', 0.1, 1.0),
+        'subsample': trial.suggest_float('subsample', 0.1, 1.0),
+        'learning_rate': trial.suggest_float('learning_rate', 1e-2, 1e-1),
+        'n_estimators': trial.suggest_int('n_estimators', 100, 1000),
+        'max_depth': trial.suggest_int('max_depth', 2, 32, log=True),
+        'min_child_weight': trial.suggest_int('min_child_weight', 1, 10),
+        'early_stopping_rounds': 10
+    }
+    model = xgb.XGBClassifier(**param)
+    model.fit(X_train_imputed, y_train, eval_set=[(X_test_imputed, y_test)], verbose=False)
+    y_pred_proba = model.predict_proba(X_test_imputed)[:, 1]
+    auc = roc_auc_score(y_test, y_pred_proba)
+    return auc
+
+study = optuna.create_study(direction='maximize')
+study.optimize(objective, n_trials=100)
+
+# Evaluate the best model
+best_params = study.best_params
+best_model = xgb.XGBClassifier(**best_params)
+best_model.fit(X_train_imputed, y_train)
+y_pred_proba = best_model.predict_proba(X_test_imputed)[:, 1]
+
+# Performance assessment
+auc = roc_auc_score(y_test, y_pred_proba)
+auprc = average_precision_score(y_test, y_pred_proba)
+classification_rep = classification_report(y_test, best_model.predict(X_test_imputed))
+
+print(f'AUC: {auc}')
+print(f'AUPRC: {auprc}')
+print(f'Classification Report: {classification_rep}')
+
+# Model interpretation with SHAP over the whole dataset
+explainer = shap.Explainer(best_model)
+shap_values = explainer(X)
+
+shap.summary_plot(shap_values, X_test)
